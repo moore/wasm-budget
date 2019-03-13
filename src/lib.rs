@@ -112,8 +112,6 @@ dual licensed as above, without any additional terms or conditions.
 
 use failure::ResultExt;
 use rayon::prelude::*;
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::path;
 use walrus::ir::VisitorMut;
 
@@ -143,207 +141,162 @@ pub fn snip(options: Options) -> Result<walrus::Module, failure::Error> {
     let mut module = walrus::Module::from_file(&options.input)
         .with_context(|_| format!("failed to parse wasm from: {}", options.input.display()))?;
 
-    let names: HashSet<String> = options.functions.iter().cloned().collect();
-    let re_set = build_regex_set(options).context("failed to compile regex")?;
-    let to_snip = find_functions_to_snip(&module, &names, &re_set);
-
-    replace_calls_with_unreachable(&mut module, &to_snip);
-    unexport_snipped_functions(&mut module, &to_snip);
-    unimport_snipped_functions(&mut module, &to_snip);
-    snip_table_elements(&mut module, &to_snip);
-    delete_functions_to_snip(&mut module, &to_snip);
+    inject_counting(&mut module);
+    
     walrus::passes::gc::run(&mut module);
 
     Ok(module)
 }
 
-fn build_regex_set(mut options: Options) -> Result<regex::RegexSet, failure::Error> {
-    // Snip the Rust `fmt` code, if requested.
-    if options.snip_rust_fmt_code {
-        // Mangled symbols.
-        options.patterns.push(".*4core3fmt.*".into());
-        options.patterns.push(".*3std3fmt.*".into());
 
-        // Mangled in impl.
-        options.patterns.push(r#".*core\.\.fmt\.\..*"#.into());
-        options.patterns.push(r#".*std\.\.fmt\.\..*"#.into());
-
-        // Demangled symbols.
-        options.patterns.push(".*core::fmt::.*".into());
-        options.patterns.push(".*std::fmt::.*".into());
-    }
-
-    // Snip the Rust `panicking` code, if requested.
-    if options.snip_rust_panicking_code {
-        // Mangled symbols.
-        options.patterns.push(".*4core9panicking.*".into());
-        options.patterns.push(".*3std9panicking.*".into());
-
-        // Mangled in impl.
-        options.patterns.push(r#".*core\.\.panicking\.\..*"#.into());
-        options.patterns.push(r#".*std\.\.panicking\.\..*"#.into());
-
-        // Demangled symbols.
-        options.patterns.push(".*core::panicking::.*".into());
-        options.patterns.push(".*std::panicking::.*".into());
-    }
-
-    Ok(regex::RegexSet::new(options.patterns)?)
-}
-
-fn find_functions_to_snip(
-    module: &walrus::Module,
-    names: &HashSet<String>,
-    re_set: &regex::RegexSet,
-) -> HashSet<walrus::FunctionId> {
-    module
-        .funcs
-        .par_iter()
-        .filter_map(|f| {
-            f.name.as_ref().and_then(|name| {
-                if names.contains(name) || re_set.is_match(name) {
-                    Some(f.id())
-                } else {
-                    None
-                }
-            })
-        })
-        .collect()
-}
-
-fn delete_functions_to_snip(module: &mut walrus::Module, to_snip: &HashSet<walrus::FunctionId>) {
-    for f in to_snip.iter().cloned() {
-        module.funcs.delete(f);
-    }
-}
-
-fn replace_calls_with_unreachable(
+fn inject_counting(
     module: &mut walrus::Module,
-    to_snip: &HashSet<walrus::FunctionId>,
 ) {
-    struct Replacer<'a> {
+    struct Injector<'a> {
         func: &'a mut walrus::LocalFunction,
-        to_snip: &'a HashSet<walrus::FunctionId>,
+        count: i64,
+        counter_id: walrus::GlobalId,
+        budget_id: walrus::GlobalId,
     }
 
-    impl Replacer<'_> {
-        // If `id` is a call to a function we are snipping, return its
-        // arguments. We need to keep the arguments around because they might
-        // perform some visible side effects.
-        fn should_snip_call(&self, id: walrus::ir::ExprId) -> Option<Vec<walrus::ir::ExprId>> {
-            if let walrus::ir::Expr::Call(walrus::ir::Call { func, args }) = self.func.get(id) {
-                if self.to_snip.contains(func) {
-                    return Some(args.iter().cloned().collect());
-                }
-            }
+    
+    impl Injector<'_> {
+        fn inject ( &mut self, block: &mut walrus::ir::Block ) {
 
-            None
+            let count   = block.exprs.len() as i64;
+            //println!("count is {:?}", count); //BOOG
+            let counter = self.counter_id;
+            let budget  = self.budget_id;
+            
+            let set_op = {
+                let builder = self.func.builder_mut();
+                
+                let get_op      = builder.global_get(counter);
+                let count_op    = builder.i64_const(count);
+                let add_op      = builder.binop(walrus::ir::BinaryOp::I64Add, get_op, count_op);
+                builder.global_set(counter, add_op)
+            };
+
+            let if_block = {
+                let builder = self.func.builder_mut();
+
+                let budget_op   = builder.global_get(budget);
+                let get_op      = builder.global_get(counter);
+                let less_op     = builder.binop(walrus::ir::BinaryOp::I64LtS, budget_op, get_op);
+                let bail_op     = builder.unreachable();
+
+                let bail_block  = {
+                    let mut bail_builder = builder.block(Box::new([]), Box::new([])); 
+
+                    bail_builder.expr(bail_op);
+                    bail_builder.id()
+                };
+
+                let empty_block = {
+                    builder.block(Box::new([]), Box::new([])).id()
+                };
+
+                builder.if_else(less_op, bail_block, empty_block)
+            };
+            
+            block.exprs.insert(0, set_op);
+            block.exprs.insert(1, if_block);
+
+            
         }
     }
-
-    impl VisitorMut for Replacer<'_> {
+     
+    
+    impl VisitorMut for Injector<'_> {
         fn local_function_mut(&mut self) -> &mut walrus::LocalFunction {
             self.func
         }
 
+
+        
         fn visit_expr_id_mut(&mut self, expr_id: &mut walrus::ir::ExprId) {
             use walrus::ir::VisitMut;
 
-            if let Some(args) = self.should_snip_call(*expr_id) {
-                let builder = self.func.builder_mut();
-
-                let mut dropped_args = Vec::with_capacity(args.len());
-                for a in args {
-                    dropped_args.push(builder.drop(a));
-                }
-
-                let unreachable = builder.unreachable();
-                *expr_id = builder.with_side_effects(dropped_args, unreachable, vec![]);
-            }
-
+            self.count += 1;
             (*expr_id).visit_mut(self);
         }
+        
+
+        /*
+        fn visit_block_mut(&mut self, expr: &mut walrus::ir::Block) {
+            use walrus::ir::VisitMut;
+        
+            self.inject(expr);
+
+            
+            for sub_expr in &mut expr.exprs {
+                sub_expr.visit_mut(self);
+            }
+            
+
+        }
+        */
+        
     }
 
+    use walrus::ValType::I64;
+    use walrus::ir::Value::I64 as I64Val;
+    use walrus::InitExpr::Value;
+    
+    let counter = module.globals.add_local(I64, true, Value(I64Val(0)));
+    let budget  = module.globals.add_local(I64, true, Value(I64Val(100)));
+    
     module.funcs.par_iter_local_mut().for_each(|(id, func)| {
-        // Don't bother transforming functions that we are snipping.
-        if to_snip.contains(&id) {
-            return;
-        }
 
-        let mut entry = func.entry_block();
-        let v = &mut Replacer { func, to_snip };
-        v.visit_block_id_mut(&mut entry);
+        let count = {
+            let mut entry = func.entry_block();
+            let v = &mut Injector { func, count: 0, counter_id: counter, budget_id: budget };
+            v.visit_block_id_mut(&mut entry);
+            v.count
+        };
+        
+        let set_op = {
+            let builder = func.builder_mut();
+        
+            let get_op      = builder.global_get(counter);
+            let count_op    = builder.i64_const(count);
+            let add_op      = builder.binop(walrus::ir::BinaryOp::I64Add, get_op, count_op);
+            builder.global_set(counter, add_op)
+        };
+
+        let if_block = {
+            let builder = func.builder_mut();
+
+            let budget_op   = builder.global_get(budget);
+            let get_op      = builder.global_get(counter);
+            let less_op     = builder.binop(walrus::ir::BinaryOp::I64LtS, budget_op, get_op);
+            let bail_op     = builder.unreachable();
+
+            let bail_block  = {
+                let mut bail_builder = builder.block(Box::new([]), Box::new([])); 
+
+                bail_builder.expr(bail_op);
+                bail_builder.id()
+            };
+
+            let empty_block = {
+                builder.block(Box::new([]), Box::new([])).id()
+            };
+
+            builder.if_else(less_op, bail_block, empty_block)
+        };
+        
+        let entry_id = func.entry_block();
+        let block = func.block_mut(entry_id);
+        block.exprs.insert(0, set_op);
+        block.exprs.insert(1, if_block);
+        
+        println!("Func {:?} has {:?} ops", id, count);
     });
+
+    
 }
 
-fn unexport_snipped_functions(module: &mut walrus::Module, to_snip: &HashSet<walrus::FunctionId>) {
-    let exports_to_snip: HashSet<walrus::ExportId> = module
-        .exports
-        .iter()
-        .filter_map(|e| match e.item {
-            walrus::ExportItem::Function(f) if to_snip.contains(&f) => Some(e.id()),
-            _ => None,
-        })
-        .collect();
 
-    for e in exports_to_snip {
-        module.exports.delete(e);
-    }
-}
 
-fn unimport_snipped_functions(module: &mut walrus::Module, to_snip: &HashSet<walrus::FunctionId>) {
-    let imports_to_snip: HashSet<walrus::ImportId> = module
-        .imports
-        .iter()
-        .filter_map(|i| match i.kind {
-            walrus::ImportKind::Function(f) if to_snip.contains(&f) => Some(i.id()),
-            _ => None,
-        })
-        .collect();
 
-    for i in imports_to_snip {
-        module.imports.delete(i);
-    }
-}
-
-fn snip_table_elements(module: &mut walrus::Module, to_snip: &HashSet<walrus::FunctionId>) {
-    let mut unreachable_funcs: HashMap<walrus::TypeId, walrus::FunctionId> = Default::default();
-
-    let make_unreachable_func = |ty: walrus::TypeId,
-                                 types: &mut walrus::ModuleTypes,
-                                 funcs: &mut walrus::ModuleFunctions|
-     -> walrus::FunctionId {
-        let mut builder = walrus::FunctionBuilder::new();
-        let unreachable = builder.unreachable();
-        builder.finish_parts(ty, vec![], vec![unreachable], types, funcs)
-    };
-
-    for t in module.tables.iter_mut() {
-        if let walrus::TableKind::Function(ref mut ft) = t.kind {
-            let types = &mut module.types;
-            let funcs = &mut module.funcs;
-
-            ft.elements
-                .iter_mut()
-                .flat_map(|el| el)
-                .filter(|f| to_snip.contains(f))
-                .for_each(|el| {
-                    let ty = funcs.get(*el).ty();
-                    *el = *unreachable_funcs
-                        .entry(ty)
-                        .or_insert_with(|| make_unreachable_func(ty, types, funcs));
-                });
-
-            ft.relative_elements
-                .iter_mut()
-                .flat_map(|(_, elems)| elems.iter_mut().filter(|f| to_snip.contains(f)))
-                .for_each(|el| {
-                    let ty = funcs.get(*el).ty();
-                    *el = *unreachable_funcs
-                        .entry(ty)
-                        .or_insert_with(|| make_unreachable_func(ty, types, funcs));
-                });
-        }
-    }
-}
