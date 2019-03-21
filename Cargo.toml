@@ -1,24 +1,21 @@
 [package]
-authors = ["Nick Fitzgerald <fitzgen@gmail.com>"]
+authors = ["Jonathan Moore <moore@eds.org>"]
 categories = ["wasm"]
-description = "Replace a wasm function with an `unreachable`."
+description = "Bound number of instructions that can be execuited by a wasm module"
 edition = "2018"
 keywords = [
-    "symbol",
+    "bounded-execution",
     "webassembly",
-    "snip",
-    "size",
-    "profiling",
-]
+    ]
 license = "Apache-2.0/MIT"
-name = "wasm-snip"
+name = "wasm-bound"
 readme = "./README.md"
-repository = "https://github.com/rustwasm/wasm-snip"
-version = "0.1.4"
+repository = "https://github.com/moore/wasm-budget"
+version = "0.1.0"
 
 [[bin]]
 doc = false
-name = "wasm-snip"
+name = "wasm-bound"
 path = "src/bin/wasm-snip.rs"
 required-features = ["exe"]
 

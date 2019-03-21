@@ -17,7 +17,7 @@ fn main() {
 fn try_main() -> Result<(), failure::Error> {
     let matches = parse_args();
 
-    let mut opts = wasm_snip::Options::default();
+    let mut opts = wasm_bound::Options::default();
 
     opts.input = path::PathBuf::from(matches.value_of("input").unwrap());
 
@@ -26,29 +26,18 @@ fn try_main() -> Result<(), failure::Error> {
         .map(|fs| fs.map(|f| f.to_string()).collect())
         .unwrap_or(vec![]);
 
-    opts.patterns = matches
-        .values_of("pattern")
-        .map(|ps| ps.map(|p| p.to_string()).collect())
-        .unwrap_or(vec![]);
 
-    if matches.is_present("snip_rust_fmt_code") {
-        opts.snip_rust_fmt_code = true;
-    }
+    let module = wasm_bound::snip(opts).context("failed to snip functions from wasm module")?;
 
-    if matches.is_present("snip_rust_panicking_code") {
-        opts.snip_rust_panicking_code = true;
-    }
-
-    let module = wasm_snip::snip(opts).context("failed to snip functions from wasm module")?;
-
+    
     if let Some(output) = matches.value_of("output") {
         module
             .emit_wasm_file(output)
-            .with_context(|_| format!("failed to emit snipped wasm to {}", output))?;
+            .with_context(|_| format!("failed to emit bounded wasm to {}", output))?;
     } else {
         let wasm = module
             .emit_wasm()
-            .context("failed to re-compile snipped module to wasm")?;
+            .context("failed to re-compile bounded module to wasm")?;
 
         let stdout = io::stdout();
         let mut stdout = stdout.lock();
@@ -57,7 +46,7 @@ fn try_main() -> Result<(), failure::Error> {
             .write_all(&wasm)
             .context("failed to write wasm to stdout")?;
     }
-
+    
     Ok(())
 }
 
@@ -68,16 +57,13 @@ fn parse_args() -> clap::ArgMatches<'static> {
         .about(env!("CARGO_PKG_DESCRIPTION"))
         .long_about(
             "
-`wasm-snip` replaces a WebAssembly function's body with an `unreachable`.
+`wasm-bound` injects aproxement instruction limites in to wasam
+files. If the limit is exceeded `unreachable` is triggered.
 
-Maybe you know that some function will never be called at runtime, but the
-compiler can't prove that at compile time? Snip it! Then run `wasm-gc`[0] again
-and all the functions it transitively called (which could also never be called
-at runtime) will get removed too.
-
-Very helpful when shrinking the size of WebAssembly binaries!
-
-[0]: https://github.com/alexcrichton/wasm-gc
+Sometimes you want to run a wasm module but want to make sure it can't
+speed too much time executing wasm instructions before returning. The
+wasm-bound file will inject aproximet instruction counting your wasm
+module so that you wont get stuck in a loop evere agine!
 ",
         )
         .arg(
@@ -90,32 +76,11 @@ Very helpful when shrinking the size of WebAssembly binaries!
         .arg(
             clap::Arg::with_name("input")
                 .required(true)
-                .help("The input wasm file containing the function(s) to snip."),
+                .help("The input wasm file containing the function(s) to bound."),
         )
         .arg(clap::Arg::with_name("function").multiple(true).help(
-            "The specific function(s) to snip. These must match \
-             exactly. Use the -p flag for fuzzy matching.",
+            "The specific function(s) to skip. These must match \
+             exactly.",
         ))
-        .arg(
-            clap::Arg::with_name("pattern")
-                .required(false)
-                .multiple(true)
-                .short("p")
-                .long("pattern")
-                .takes_value(true)
-                .help("Snip any function that matches the given regular expression."),
-        )
-        .arg(
-            clap::Arg::with_name("snip_rust_fmt_code")
-                .required(false)
-                .long("snip-rust-fmt-code")
-                .help("Snip Rust's `std::fmt` and `core::fmt` code."),
-        )
-        .arg(
-            clap::Arg::with_name("snip_rust_panicking_code")
-                .required(false)
-                .long("snip-rust-panicking-code")
-                .help("Snip Rust's `std::panicking` and `core::panicking` code."),
-        )
         .get_matches()
 }
