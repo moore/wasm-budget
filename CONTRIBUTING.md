@@ -1,4 +1,4 @@
-# Contributing to `wasm-snip`
+# Contributing to `wasm-bound`
 
 Hi! We'd love to have your contributions! If you want help or mentorship, reach
 out to us in a GitHub issue, or ping `fitzgen`

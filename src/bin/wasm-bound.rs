@@ -26,10 +26,8 @@ fn try_main() -> Result<(), failure::Error> {
         .map(|fs| fs.map(|f| f.to_string()).collect())
         .unwrap_or(vec![]);
 
-
     let module = wasm_bound::snip(opts).context("failed to snip functions from wasm module")?;
 
-    
     if let Some(output) = matches.value_of("output") {
         module
             .emit_wasm_file(output)
@@ -46,7 +44,7 @@ fn try_main() -> Result<(), failure::Error> {
             .write_all(&wasm)
             .context("failed to write wasm to stdout")?;
     }
-    
+
     Ok(())
 }
 
