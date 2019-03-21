@@ -6,18 +6,15 @@ use walrus::ir::*;
 use walrus::LocalFunction;
 
 /// Options for controlling which functions in what `.wasm` file should be
-/// snipped.
+/// bound.
 #[derive(Clone, Debug, Default)]
 pub struct Options {
-    /// The input `.wasm` file that should have its functions snipped.
+    /// The input `.wasm` file that should have its functions bound.
     pub input: path::PathBuf,
-
-    /// The functions that should be snipped from the `.wasm` file.
-    pub functions: Vec<String>,
 }
 
-/// Snip the functions from the input file described by the options.
-pub fn snip(options: Options) -> Result<walrus::Module, failure::Error> {
+/// Bound the functions from the input file described by the options.
+pub fn bound(options: Options) -> Result<walrus::Module, failure::Error> {
     let mut module = walrus::Module::from_file(&options.input)
         .with_context(|_| format!("failed to parse wasm from: {}", options.input.display()))?;
 
@@ -37,16 +34,15 @@ fn inject_counting(module: &mut walrus::Module) {
     module.funcs.par_iter_local_mut().for_each(|(_id, func)| {
         let mut map: HashMap<walrus::ir::BlockId, i64> = HashMap::new();
 
-        inject(func, &mut map);
+        count(func, &mut map);
 
         for (id, count) in map.iter() {
-            println!("Block has {:?} ops", count);
-            inject_ops(func, counter, budget, *id, *count);
+            inject(func, counter, budget, *id, *count);
         }
     });
 }
 
-fn inject_ops(
+fn inject(
     func: &mut LocalFunction,
     counter: walrus::GlobalId,
     budget: walrus::GlobalId,
@@ -88,7 +84,7 @@ fn inject_ops(
     block.exprs.insert(1, if_block);
 }
 
-fn inject(func: &LocalFunction, map: &mut HashMap<walrus::ir::BlockId, i64>) {
+fn count(func: &LocalFunction, map: &mut HashMap<walrus::ir::BlockId, i64>) {
     let mut v = Injector {
         func,
         count: 0,

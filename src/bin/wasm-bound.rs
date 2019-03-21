@@ -21,12 +21,7 @@ fn try_main() -> Result<(), failure::Error> {
 
     opts.input = path::PathBuf::from(matches.value_of("input").unwrap());
 
-    opts.functions = matches
-        .values_of("function")
-        .map(|fs| fs.map(|f| f.to_string()).collect())
-        .unwrap_or(vec![]);
-
-    let module = wasm_bound::snip(opts).context("failed to snip functions from wasm module")?;
+    let module = wasm_bound::bound(opts).context("failed to bound functions from wasm module")?;
 
     if let Some(output) = matches.value_of("output") {
         module
